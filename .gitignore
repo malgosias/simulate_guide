@@ -1,0 +1,5 @@
+*~
+*.fits.gz
+*pickle
+*pyc
+.ipynb_checkpoints/
