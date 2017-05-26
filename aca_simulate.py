@@ -41,10 +41,11 @@ class ImgList(list):
         return np.array([getattr(img, attr) for img in self])
 
 
-def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
-                   imgsize=6, t_ccd=None, dark=None, select='before', nframes=1000,
+def simulate_guide(times, quat, yag=0., zag=0., maxmag=13.0, dither=None,
+                   imgsize=6, t_ccd=None, dark=None, select='before',
                    radius=40.):
     """
+    :times: time (e.g. from OBC for comparison with telemetry)
     :quat: initial (catalog) ACA attitude
     :yag, zag, maxmag: star yag, zag (arcsec), faintest star magnitude
     :dither: dict with keys for dither y, z ampl (arcsec), period (sec),
@@ -55,7 +56,6 @@ def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
            or a 1024x1024 image (e-/sec).  If image is provided then 't_ccd'
            is ignored.  Default is to use the most recent dark cal.
     :select: ACA DCC selection for simulated background (before|nearest|after)
-    :nframes: number of time frames
     :radius: in arcsec, simulated star field includes stars within distance
              given with radius from yag, zag
     """
@@ -65,25 +65,17 @@ def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
 
     # Times
     delta_t = {4: 2.05, 6: 2.05, 8: 4.1}
-    times = np.arange(nframes) * delta_t[imgsize]
+    # times = np.arange(nframes) * delta_t[imgsize]
     
     # Dither
     if dither is None:
         dither = {'dither_y_amp': 8., 'dither_z_amp': 8.,
-                  'dither_y_period': 1000., 'dither_z_period': 707.,
+                  'dither_y_period': 1000., 'dither_z_period': 707.1,
                   'dither_y_phase': 0., 'dither_z_phase': 0.}
 
     # Yaw / Pitch
-    yaw = calc_dither(times,
-                      dither['dither_y_amp'],
-                      dither['dither_y_period'],
-                      dither['dither_y_phase'])
-    pitch = calc_dither(times,
-                        dither['dither_z_amp'],
-                        dither['dither_z_period'],
-                        dither['dither_z_phase'])
-    
-    print(dither, yag, zag, quat)
+    yaw = calc_dither(times, dither, 'y')
+    pitch = calc_dither(times, dither, 'z')
     
     # Fetch spoiler stars within radius from the catalog yag, zag,
     # including the star of interest
@@ -95,11 +87,11 @@ def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
     star_field = simulate_star_field(stars, quat, yag, zag, radius=1.5*radius, **kwargs)
     
     # Initialize the first two images
-    col0s = np.zeros(nframes)
-    row0s = np.zeros(nframes)
-    img_sums = np.zeros(nframes)
-    rows = np.zeros(nframes)
-    cols = np.zeros(nframes)
+    col0s = np.zeros_like(times)
+    row0s = np.zeros_like(times)
+    img_sums = np.zeros_like(times)
+    rows = np.zeros_like(times)
+    cols = np.zeros_like(times)
     
     row, col = yagzag_to_pixels(yag, zag)
     row0s[0:2] = np.round([row - imgsize / 2] * 2)
@@ -119,33 +111,24 @@ def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
     dy, dp = yaw[1] - yaw[0], pitch[1] - pitch[0]
     dq = Quat([dy / 3600., -dp / 3600., 0.])
     quats = [quat, quat * dq]
-    true_ras = [ra, ra + dq.ra0]
-    true_decs = [dec, dec + dq.dec]
     true_yags = [yag, yag]
     true_zags = [zag, zag]
 
+    n = len(times)
     counter = 0
     
-    for ii in range(1, nframes - 1):
-        
-        dy = yaw[ii + 1] - yaw[ii]
-        dp = pitch[ii + 1] - pitch[ii]
-        dq = Quat([dy / 3600., -dp / 3600., 0.])
-        quats.append(quats[ii] * dq)
-
-        ra = ra + dq.ra0
-        dec = dec + dq.dec
-        true_ras.append(ra)
-        true_decs.append(dec)
-
-        y, z = radec2yagzag(ra, dec, quats[ii + 1])
+    for ii in range(1, n - 1):
+        dyaw, dpitch = yaw[ii + 1] - yaw[0], pitch[ii + 1] - pitch[0]
+        dq = Quat([dyaw / 3600., -dpitch / 3600., 0.])
+        quats.append(quat * dq)
+        y, z = radec2yagzag(ra, dec, quats[-1])
         true_yags.append(y * 3600.)
         true_zags.append(z * 3600.)
         
         img0 = imgs[ii - 1]
         img1 = imgs[ii]
         
-        if img0.IMGFUNC1 == 1 and img1.IMGFUNC1 == 1 and ii < nframes - 1:
+        if img0.IMGFUNC1 == 1 and img1.IMGFUNC1 == 1 and ii < n - 1:
             # Predict next IMGCOL0/IMGROW0 using rate
             rate_r = rows[ii] - rows[ii - 1]
             rate_c = cols[ii] - cols[ii - 1]
@@ -178,7 +161,7 @@ def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
         new_img.IMGSIZE = imgsize
         new_img = subtract_bgd(new_img)
         new_img.IMGRAW = star_field[readout]
-        if ii < nframes - 1:
+        if ii < n - 1:
             imgs.append(new_img)        
             img_sums[ii + 1], rows[ii + 1], cols[ii + 1] = calc_centroids(new_img)
             if img_sums[ii + 1] < mag_to_count_rate(maxmag) * INTEG / GAIN / 2:
@@ -210,8 +193,6 @@ def simulate_guide(quat, yag=0., zag=0., maxmag=13.0, dither=None,
              'funcs': imgs.funcs,
              'true_yags': true_yags,
              'true_zags': true_zags,
-             'true_ras': true_ras,
-             'true_decs': true_decs,
              'aca_yags': aca_yags,
              'aca_zags': aca_zags,
              'aca_mags': aca_mags,
@@ -252,16 +233,16 @@ def simulate_star_field(stars, quat, yag, zag, radius,
     # Size of the simulated star field
     sz = np.int(np.round(2 * radius / 5.)) # px
 
-    # Define ACAImage corresponding to the simulated CCD region
+    # Define ACAImage corresponding to the simulated CCD region, centered at yag, zag
     row, col = yagzag_to_pixels(yag, zag)
     imgrow0, imgcol0 = np.round(row - sz / 2.), np.round(col - sz / 2.)
-    section = ACAImage(np.zeros((sz, sz)), row0=imgrow0, col0=imgcol0)
+    section = ACAImage(row0=imgrow0, col0=imgcol0, shape=(sz, sz))
     
     # Initate with DCC background
     star_field = dccimg[section] * INTEG / GAIN # convert from e-/sec to AD counts
     
     for star in stars:
-        img = simulate_star(quat, star['RA'], star['DEC'], star['MAG_ACA'],
+        img = simulate_star(quat, star['RA_PMCORR'], star['DEC_PMCORR'], star['MAG_ACA'],
                             row0=imgrow0, col0=imgcol0, sz=sz)
         star_field = star_field + img        
 
@@ -281,12 +262,17 @@ def simulate_star_field(stars, quat, yag, zag, radius,
     return star_field
 
 
-def calc_dither(times, amp, period, phase):
+def calc_dither(times, dither, coord):
     """
-    Return dither pattern computed over the time
-    defined with ndarray times.
+    Return dither pattern for given coordinate coord ('y' or 'z') computed over
+    the time range defined with times.
     """
-    return amp * np.sin(2 * np.pi * times / period + 2 * np.pi * phase)
+    if coord not in ('y', 'z'):
+        raise ValueError("Coordinate expected to be 'y' or 'z'")
+    amp = dither['dither_{}_amp'.format(coord)]
+    period = dither['dither_{}_period'.format(coord)]
+    phase = dither['dither_{}_phase'.format(coord)]
+    return amp * np.sin(2. * np.pi * times / period + 2. * np.pi * phase)
 
 
 def simulate_star(quat, ra, dec, mag, row0, col0, sz):
@@ -307,10 +293,11 @@ def simulate_star(quat, ra, dec, mag, row0, col0, sz):
 
     # Grid centered at (0, 0)
     # Without -0.5 simulated centroids are off from telemetry by 0.5px
-    r, c = np.mgrid[-halfsize:halfsize, -halfsize:halfsize] - 0.5
+    r, c = np.mgrid[-halfsize:halfsize, -halfsize:halfsize] + 0.5
 
     # Model
     sigma = FWHM / (2. * np.sqrt(2. * np.log(2.)))
+    # Offsets from image center
     roff = row - row0 - halfsize
     coff = col - col0 - halfsize
     g = np.exp(-((r - roff)**2  / sigma**2 + (c - coff)**2 / sigma**2) / 2.)
@@ -319,13 +306,14 @@ def simulate_star(quat, ra, dec, mag, row0, col0, sz):
     counts =  mag_to_count_rate(mag) * INTEG / GAIN
 
     # Normalize to counts, 6x6 contains all the counts, ok?
-    r1 = np.int(np.round(roff - 3 - halfsize))
-    r2 = np.int(np.round(roff + 3 - halfsize))
-    c1 = np.int(np.round(coff - 3 - halfsize))
-    c2 = np.int(np.round(coff + 3 - halfsize))
-    
     # Otherwise mag does not match with telemetry
-    g = counts * g / g[r1: r2, c1: c2].sum()
+    # r1 = np.int(np.round(roff - 3 - halfsize))
+    # r2 = np.int(np.round(roff + 3 - halfsize))
+    # c1 = np.int(np.round(coff - 3 - halfsize))
+    # c2 = np.int(np.round(coff + 3 - halfsize))
+    
+    # g = counts * g / g[r1: r2, c1: c2].sum()
+    g = counts * g / g.sum()
 
     # Simulate star
     star = ACAImage(np.random.normal(g), row0=row0, col0=col0)
